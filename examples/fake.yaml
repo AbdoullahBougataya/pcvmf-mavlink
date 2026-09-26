@@ -1,0 +1,51 @@
+codecs:
+- pcvmf_mavlink.messages:VehicleTelemetryCodec
+- pcvmf_mavlink.messages:ConnectionStatusCodec
+- pcvmf_mavlink.messages:ActionRequestCodec
+- pcvmf_mavlink.messages:ActionResultCodec
+workers:
+- name: flight
+  plugin:
+    class: pcvmf_mavlink.worker:FlightControllerWorker
+    options:
+      backend: fake
+      firmware: px4
+      connection: {}
+      commands_enabled: true
+  publications:
+  - flight/telemetry
+  - flight/status
+  - flight/result
+  rate_hz: 50
+  startup_timeout: 30
+  progress_timeout: 10
+  shutdown_timeout: 5
+  subscriptions:
+  - source: smoke
+    topic: flight/command
+    delivery: ordered
+- name: smoke
+  plugin:
+    class: pcvmf_mavlink.examples:SmokeWorker
+    options:
+      actions:
+      - arm
+      - takeoff
+      - land
+      - disarm
+  rate_hz: 50
+  publications:
+  - flight/command
+  subscriptions:
+  - source: flight
+    topic: flight/telemetry
+    delivery: latest
+  - source: flight
+    topic: flight/status
+    delivery: latest
+  - source: flight
+    topic: flight/result
+    delivery: ordered
+logging:
+  mcap:
+    directory: recordings

@@ -1,0 +1,25 @@
+codecs:
+- pcvmf_mavlink.messages:VehicleTelemetryCodec
+- pcvmf_mavlink.messages:ConnectionStatusCodec
+- pcvmf_mavlink.messages:ActionRequestCodec
+- pcvmf_mavlink.messages:ActionResultCodec
+workers:
+- name: flight
+  plugin:
+    class: pcvmf_mavlink.worker:FlightControllerWorker
+    options:
+      backend: pymavlink
+      firmware: px4
+      connection:
+        transport: udpin
+        host: 0.0.0.0
+        port: 14540
+      commands_enabled: false
+  publications:
+  - flight/telemetry
+  - flight/status
+  - flight/result
+  rate_hz: 50
+  startup_timeout: 30
+  progress_timeout: 10
+  shutdown_timeout: 5

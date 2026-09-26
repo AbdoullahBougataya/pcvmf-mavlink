@@ -1,0 +1,29 @@
+import json
+import multiprocessing
+from pathlib import Path
+
+import pytest
+import yaml
+from pcvmf.config import load_config, parse_config
+from pcvmf.runtime import Application
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("path", sorted((ROOT / "examples").glob("*.yaml")))
+def test_example_configuration(path):
+    load_config(path)
+
+
+def test_spawned_typed_messages_commands_and_cleanup(tmp_path):
+    raw = yaml.safe_load((ROOT / "examples/fake.yaml").read_text())
+    raw["logging"]["mcap"]["directory"] = str(tmp_path / "recordings")
+    output = tmp_path / "received.json"
+    raw["workers"][1]["plugin"]["options"]["output"] = str(output)
+    children = {p.pid for p in multiprocessing.active_children()}
+    result = Application(parse_config(raw)).run()
+    assert result.exit_code == 0, result.errors
+    assert result.ready
+    assert json.loads(output.read_text())["actions_observed"] == ["arm", "takeoff", "land", "disarm"]
+    assert {p.pid for p in multiprocessing.active_children()} == children
+    assert Path(result.recording_path).stat().st_size > 0

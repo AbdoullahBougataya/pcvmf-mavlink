@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pcvmf-mavlink"
+version = "0.1.0"
+description = "PX4 and ArduCopter communication workers for PCVMF"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["PCVMF>=0.3.0,<0.4"]
+
+[project.optional-dependencies]
+pymavlink = ["pymavlink>=2.4.49,<3", "pyserial>=3.5,<4"]
+mavsdk = ["mavsdk==3.10.2"]
+all = ["pymavlink>=2.4.49,<3", "pyserial>=3.5,<4", "mavsdk==3.10.2"]
+dev = ["pytest>=8,<10", "ruff>=0.3", "black>=24"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pcvmf_mavlink"]
+
+[tool.uv.sources]
+PCVMF = { path = "../.." }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["sitl: requires an explicitly supplied running simulator"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 120
+target-version = ['py310']

@@ -1,0 +1,25 @@
+codecs:
+- pcvmf_mavlink.messages:VehicleTelemetryCodec
+- pcvmf_mavlink.messages:ConnectionStatusCodec
+- pcvmf_mavlink.messages:ActionRequestCodec
+- pcvmf_mavlink.messages:ActionResultCodec
+workers:
+- name: flight
+  plugin:
+    class: pcvmf_mavlink.worker:FlightControllerWorker
+    options:
+      backend: pymavlink
+      firmware: arducopter
+      connection:
+        transport: tcp
+        host: 127.0.0.1
+        port: 5760
+      commands_enabled: false
+  publications:
+  - flight/telemetry
+  - flight/status
+  - flight/result
+  rate_hz: 50
+  startup_timeout: 30
+  progress_timeout: 10
+  shutdown_timeout: 5
