@@ -13,6 +13,7 @@ import time
 from importlib.resources import files
 from types import SimpleNamespace
 
+from ..transactions import float32, item_from_wire, item_to_wire
 from .base import Backend, LinkLost, heartbeat_values
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ class MavsdkBackend(Backend):
         import grpc
         from mavsdk.action import Action
         from mavsdk.mavlink_direct import MavlinkDirect
+        from mavsdk.mission_raw import MissionRaw
+        from mavsdk.param import Param
         from mavsdk.telemetry import Telemetry
 
         self.grpc = grpc
@@ -64,6 +67,8 @@ class MavsdkBackend(Backend):
                 continue
         provider = SimpleNamespace(channel=self.channel)
         self.action = Action(provider)
+        self.mission_api = MissionRaw(provider)
+        self.param_api = Param(provider)
         self.telemetry_api = Telemetry(provider)
         self.direct = MavlinkDirect(provider)
         self.tasks.append(asyncio.create_task(self._heartbeats()))
@@ -212,3 +217,94 @@ class MavsdkBackend(Backend):
                 errors.append(exc)
         if errors:
             raise RuntimeError("MAVSDK cleanup failed") from errors[0]
+
+    @staticmethod
+    def _transaction_error(exc):
+        result = exc._result.result.name
+        if result in ("TIMEOUT", "CONNECTION_ERROR", "UNKNOWN", "NO_SYSTEM", "TRANSFER_CANCELLED", "PROTOCOL_ERROR"):
+            return "outcome_unknown", f"MAVSDK {result}", None
+        return (
+            {"UNSUPPORTED": "unsupported", "INT_MESSAGES_NOT_SUPPORTED": "unsupported", "BUSY": "busy"}.get(
+                result, "rejected"
+            ),
+            f"MAVSDK {result}",
+            None,
+        )
+
+    async def transfer_mission(self, request):
+        from mavsdk.mission_raw import MissionItem, MissionRawError
+
+        if len(request.items) > self.options.max_mission_items:
+            raise ValueError("mission exceeds max_mission_items")
+        try:
+            if request.operation == "upload":
+                items = [
+                    MissionItem(seq=index, mission_type=0, **item_to_wire(item))
+                    for index, item in enumerate(request.items)
+                ]
+                await self.mission_api.upload_mission(items)
+            elif request.operation == "clear":
+                await self.mission_api.clear_mission()
+            else:
+                downloaded = await self.mission_api.download_mission()
+                if len(downloaded) > self.options.max_mission_items:
+                    raise ValueError("download exceeds max_mission_items")
+                items = []
+                for index, item in enumerate(downloaded):
+                    if item.seq != index or item.mission_type != 0:
+                        raise ValueError("autopilot returned an inconsistent mission sequence/type")
+                    items.append(item_from_wire(vars(item)))
+                return "accepted", "mission downloaded", items
+            return "accepted", "MAVSDK mission transaction succeeded", None
+        except asyncio.CancelledError:
+            # Cancel server-side transfers too; cancelling the RPC alone is not
+            # sufficient, especially when using an externally managed server.
+            if request.operation != "clear":
+                cancel = (
+                    self.mission_api.cancel_mission_upload
+                    if request.operation == "upload"
+                    else self.mission_api.cancel_mission_download
+                )
+                try:
+                    await asyncio.wait_for(cancel(), 0.25)
+                except Exception:
+                    logger.debug("MAVSDK transfer cancellation failed", exc_info=True)
+            raise
+        except MissionRawError as exc:
+            if request.operation == "download" and exc._result.result.name == "NO_MISSION_AVAILABLE":
+                return "accepted", "no mission stored", []
+            return self._transaction_error(exc)
+        except self.grpc.aio.AioRpcError as exc:
+            return "outcome_unknown", f"MAVSDK RPC {exc.code()}", None
+
+    async def parameter(self, request):
+        from mavsdk.param import ParamError
+
+        if self.options.target_component != 1:
+            return "unsupported", "MAVSDK parameter API supports autopilot component 1 only", None
+        written = False
+        try:
+            # The pinned server's SelectComponent RPC returns UNKNOWN. Use its
+            # default V1/autopilot selection, checked during option validation.
+            getter = getattr(self.param_api, f"get_param_{request.parameter_type}")
+            value = await getter(request.name)  # Verify name/type before writing.
+            if request.operation == "set":
+                expected = float32(request.value) if request.parameter_type == "float" else request.value
+                written = True
+                await getattr(self.param_api, f"set_param_{request.parameter_type}")(request.name, expected)
+                value = await getter(request.name)
+                if value != expected:
+                    return "outcome_unknown", "parameter readback does not match the requested value", None
+            if request.parameter_type == "float":
+                value = float32(value)
+            return "accepted", "parameter value observed on the autopilot", value
+        except ParamError as exc:
+            if written:
+                return "outcome_unknown", f"MAVSDK write/readback {exc._result.result.name}", None
+            return self._transaction_error(exc)
+        except ValueError as exc:
+            if written:
+                return "outcome_unknown", f"parameter readback could not be validated: {exc}", None
+            raise
+        except self.grpc.aio.AioRpcError as exc:
+            return "outcome_unknown", f"MAVSDK RPC {exc.code()}", None

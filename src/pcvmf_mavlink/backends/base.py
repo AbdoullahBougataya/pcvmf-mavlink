@@ -37,6 +37,12 @@ class Backend(ABC):
     @abstractmethod
     async def close(self): ...
 
+    async def transfer_mission(self, request):
+        return "unsupported", "backend does not implement mission transfer", None
+
+    async def parameter(self, request):
+        return "unsupported", "backend does not implement parameters", None
+
     def require_armed(self):
         sample = self.samples.get("state")
         if (

@@ -68,6 +68,11 @@ Structural validation does not establish vehicle reachability.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `commands_enabled` | `false` | Explicitly enable incoming flight actions |
+| `missions_enabled` | `false` | Enable mission upload, download and clearing |
+| `parameters_enabled` | `false` | Enable named parameter reads |
+| `parameter_writes_enabled` | `false` | Also enable parameter writes; requires `parameters_enabled` |
+| `transfer_timeout_s`, `parameter_timeout_s` | `30`, `5` | Whole mission / parameter transaction deadlines |
+| `max_mission_items` | `500` | Upload/download item limit (1–10000) |
 | `target_system`, `target_component` | `1`, `1` | Expected autopilot IDs |
 | `source_system`, `source_component` | `245`, `190` | This connection's MAVLink identity |
 | `connect_timeout_s` | `15` | Initial connection and each reconnect attempt |
@@ -149,6 +154,42 @@ replayed after reconnect. New commands require the new status session ID. Result
 queue overflow and unexpected backend errors fail the worker rather than silently
 discarding results. Initial connection failure fails application startup.
 
+## Mission transfer and parameters
+
+All three supported backend/firmware pairs implement mission upload, download,
+and clearing, and named integer/float parameter reads and writes. These features
+are opt-in through the options above, independent of `commands_enabled`.
+Register the codecs for each feature you use, alongside the telemetry/status
+codecs and any action codecs your application uses:
+
+```yaml
+codecs:
+- pcvmf_mavlink.transactions:MissionRequestCodec
+- pcvmf_mavlink.transactions:MissionResultCodec
+- pcvmf_mavlink.transactions:ParameterRequestCodec
+- pcvmf_mavlink.transactions:ParameterResultCodec
+```
+
+Publish these requests on the existing `flight/command` topic and receive their
+typed results on `flight/result`, both with ordered delivery. All request kinds
+share the same source/session/request-ID namespace, deduplication cache, and
+single transaction slot. A mission transfer or parameter read can therefore
+produce `busy` for a concurrent flight action. `ConnectionStatus.supported_actions`
+and `commands_enabled` still describe flight actions; configure the new feature
+flags explicitly rather than inferring them from that status.
+
+The finite device-free example exercises upload/download/clear and typed
+parameter read/write/readback across spawned workers:
+
+```bash
+uv run --no-sync pcvmf config validate examples/fake-transactions.yaml
+uv run --no-sync pcvmf run --config examples/fake-transactions.yaml
+```
+
+`TransactionSmokeWorker` requires the fake backend. See
+[mission and parameter API](docs/transactions.md) for payload examples, coordinate
+frames, firmware differences, limits, and transfer outcome semantics.
+
 ## Verification and distribution
 
 ```bash
@@ -169,5 +210,7 @@ scenario. Editable installs and `PYTHONPATH` are not distribution verification.
 Enable PCVMF's native recording with `logging: {mcap: {directory: recordings}}`;
 `examples/fake.yaml` demonstrates this. The plugin needs no special recorder.
 
-No streamed setpoints, mission transfer, parameter API, raw forwarding, signing,
-fleet coordination or automatic navigation is provided in this release.
+Streamed setpoints, raw forwarding, signing, fleet coordination, and automatic
+navigation remain future work. Mission execution, geofence/rally transfer,
+parameter enumeration/metadata, and string/64-bit parameters are also outside
+the current API.

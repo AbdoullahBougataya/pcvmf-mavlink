@@ -9,6 +9,7 @@ import logging
 import time
 
 from .base import Backend, LinkLost, heartbeat_values
+from .transfers import Transfers
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class _Datagrams(asyncio.DatagramProtocol):
         self.error = exc
 
 
-class PymavlinkBackend(Backend):
+class PymavlinkBackend(Transfers, Backend):
     def __init__(self, options):
         super().__init__(options)
         self.udp = self.protocol = self.reader = self.writer = self.serial = None
@@ -38,6 +39,9 @@ class PymavlinkBackend(Backend):
         self.last_sent_heartbeat = 0.0
         self.home_altitude = None
         self.read_task = None
+        self.transaction_inbox = None
+        self.transaction_kinds = set()
+        self.parameter_name = None
 
     async def connect(self):
         from pymavlink.dialects.v20 import ardupilotmega as mavlink
@@ -124,6 +128,7 @@ class PymavlinkBackend(Backend):
             self._message(message)
 
     def _message(self, message):
+        self._transaction_message(message)
         kind = message.get_type()
         d = message.to_dict()
         if kind == "HEARTBEAT":

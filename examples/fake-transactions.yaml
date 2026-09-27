@@ -1,0 +1,35 @@
+codecs:
+- pcvmf_mavlink.messages:VehicleTelemetryCodec
+- pcvmf_mavlink.messages:ConnectionStatusCodec
+- pcvmf_mavlink.transactions:MissionRequestCodec
+- pcvmf_mavlink.transactions:MissionResultCodec
+- pcvmf_mavlink.transactions:ParameterRequestCodec
+- pcvmf_mavlink.transactions:ParameterResultCodec
+workers:
+- name: flight
+  plugin:
+    class: pcvmf_mavlink.worker:FlightControllerWorker
+    options:
+      backend: fake
+      firmware: px4
+      connection: {}
+      missions_enabled: true
+      parameters_enabled: true
+      parameter_writes_enabled: true
+  publications: [flight/telemetry, flight/status, flight/result]
+  subscriptions:
+  - {source: transactions, topic: flight/command, delivery: ordered}
+  rate_hz: 50
+  startup_timeout: 30
+  progress_timeout: 10
+  shutdown_timeout: 5
+- name: transactions
+  plugin:
+    class: pcvmf_mavlink.transaction_example:TransactionSmokeWorker
+  publications: [flight/command]
+  subscriptions:
+  - {source: flight, topic: flight/status, delivery: latest}
+  - {source: flight, topic: flight/result, delivery: ordered}
+  rate_hz: 50
+logging:
+  mcap: {directory: recordings}

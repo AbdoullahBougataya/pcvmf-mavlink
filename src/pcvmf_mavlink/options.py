@@ -11,6 +11,12 @@ class Options:
     firmware: str
     connection: dict
     commands_enabled: bool = False
+    missions_enabled: bool = False
+    parameters_enabled: bool = False
+    parameter_writes_enabled: bool = False
+    transfer_timeout_s: float = 30
+    parameter_timeout_s: float = 5
+    max_mission_items: int = 500
     target_system: int = 1
     target_component: int = 1
     source_system: int = 245
@@ -44,8 +50,14 @@ class Options:
         choice(o.firmware, ("px4", "arducopter"), "firmware")
         if o.backend == "mavsdk" and o.firmware != "px4":
             raise ValueError("MAVSDK/ArduCopter is not supported in this release")
-        if type(o.commands_enabled) is not bool:
-            raise ValueError("commands_enabled must be boolean")
+        for key in ("commands_enabled", "missions_enabled", "parameters_enabled", "parameter_writes_enabled"):
+            if type(getattr(o, key)) is not bool:
+                raise ValueError(f"{key} must be boolean")
+        if o.parameter_writes_enabled and not o.parameters_enabled:
+            raise ValueError("parameter_writes_enabled requires parameters_enabled")
+        if o.backend == "mavsdk" and o.parameters_enabled and o.target_component != 1:
+            raise ValueError("MAVSDK parameter API supports autopilot component 1 only")
+        number(o.max_mission_items, "max_mission_items", 1, 10000, True)
         for k in ("target_system", "target_component", "source_system", "source_component"):
             number(getattr(o, k), k, 1, 255, True)
         if o.source_system == o.target_system:
@@ -54,6 +66,8 @@ class Options:
             "connect_timeout_s",
             "link_timeout_s",
             "action_timeout_s",
+            "transfer_timeout_s",
+            "parameter_timeout_s",
             "telemetry_stale_s",
             "telemetry_hz",
             "reconnect_initial_s",

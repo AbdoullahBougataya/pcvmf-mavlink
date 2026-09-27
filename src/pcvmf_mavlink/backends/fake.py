@@ -3,6 +3,7 @@
 import asyncio
 import time
 
+from ..transactions import float32
 from .base import Backend
 
 
@@ -10,6 +11,8 @@ class FakeBackend(Backend):
     async def connect(self):
         self.armed = False
         self.altitude = 0.0
+        self.mission = []
+        self.parameters = {"TEST_INT": ("int", 42), "TEST_FLOAT": ("float", 1.25)}
         self.last_heartbeat = time.monotonic()
         await self.poll()
 
@@ -44,3 +47,29 @@ class FakeBackend(Backend):
 
     async def close(self):
         pass
+
+    async def transfer_mission(self, request):
+        await asyncio.sleep(0.02)
+        if len(request.items) > self.options.max_mission_items:
+            raise ValueError("mission exceeds max_mission_items")
+        if request.operation == "upload":
+            self.mission = list(request.items)
+        elif request.operation == "clear":
+            self.mission.clear()
+        return (
+            "accepted",
+            "fake mission transaction completed",
+            list(self.mission) if request.operation == "download" else None,
+        )
+
+    async def parameter(self, request):
+        await asyncio.sleep(0.02)
+        if request.name not in self.parameters:
+            raise ValueError("unknown fake parameter")
+        kind, value = self.parameters[request.name]
+        if kind != request.parameter_type:
+            raise ValueError("parameter type does not match")
+        if request.operation == "set":
+            value = float32(request.value) if kind == "float" else request.value
+            self.parameters[request.name] = (kind, value)
+        return "accepted", "fake parameter value observed", value

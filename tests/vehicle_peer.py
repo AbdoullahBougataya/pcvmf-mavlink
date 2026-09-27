@@ -26,6 +26,7 @@ class VehiclePeer:
         self.takeoff_altitude = 2.0
         self.closed = False
         self.drop_after_action = False
+        self.capabilities = 8192
 
     def write(self, data):
         if self.send and self.transmit:
@@ -33,6 +34,8 @@ class VehiclePeer:
 
     def receive(self, data):
         for msg in self.mav.parse_buffer(data) or []:
+            if self.extra_message(msg):
+                continue
             if msg.get_type() == "COMMAND_LONG":
                 self.commands.append(msg)
                 if msg.command == 400:
@@ -56,12 +59,17 @@ class VehiclePeer:
                 if not self.drop_ack:
                     self.mav.command_ack_send(msg.command, 0, 0, 0, msg.get_srcSystem(), msg.get_srcComponent())
                 if msg.command == 520:
-                    self.mav.autopilot_version_send(8192, 0x010F0000, 0, 0, 0, [0] * 8, [0] * 8, [0] * 8, 0, 0, 42)
+                    self.mav.autopilot_version_send(
+                        self.capabilities, 0x010F0000, 0, 0, 0, [0] * 8, [0] * 8, [0] * 8, 0, 0, 42
+                    )
             elif msg.get_type() in ("PARAM_REQUEST_READ", "PARAM_SET"):
                 if msg.get_type() == "PARAM_SET":
                     self.takeoff_altitude = msg.param_value
                 param_id = msg.param_id.encode() if isinstance(msg.param_id, str) else msg.param_id
                 self.mav.param_value_send(param_id, self.takeoff_altitude, 9, 1, 0)
+
+    def extra_message(self, message):
+        return False
 
     def telemetry(self):
         self.mav.heartbeat_send(2, 12 if self.firmware == "px4" else 3, 1 | (128 if self.armed else 0), self.mode, 4)

@@ -22,7 +22,8 @@ development. ARM64 is included in the added CI matrix; a configured job is not
 evidence that it has run. Serial verification uses Linux pseudo-terminals and
 the real library transports, not USB hardware or radio links.
 
-Validation completed on 2026-09-26:
+Initial action/telemetry baseline validation completed on 2026-09-26
+(before mission/parameter additions):
 
 | Check | Result |
 | --- | --- |
@@ -122,6 +123,46 @@ new session identity, old-session rejection and no application-level replay.
 These controlled transport tests are not a claim that radio failsafe behavior
 has been verified on aircraft. Native MAVSDK retries may already be in flight
 when a request is cancelled, especially with an externally managed server.
+
+## Mission and parameter acceptance
+
+The complete package suite after these additions passed on Python 3.10.20,
+3.11.15, and 3.12.3: **109 passed, 2 skipped** on each interpreter. The two
+skips are explicit simulator opt-ins; mission/parameter simulator checks were
+run separately as described below. Ruff, Black, and `pcvmf config validate
+examples/fake-transactions.yaml` passed. The action/telemetry SITL results above
+remain earlier baseline evidence; those flight scenarios were not rerun here.
+
+On 2026-09-26 the new mission/parameter tests passed against the same local
+firmware revisions above, separately for pymavlink/PX4, MAVSDK/PX4, and
+pymavlink/ArduCopter. Each used a dedicated simulator with fresh temporary state.
+The checks uploaded a mission, verified downloaded commands and coordinates,
+cleared it and checked the remaining items. They also read integer and float
+parameters and wrote their existing values back with confirmation. These checks
+did not arm, take off, start a mission, or tune a parameter.
+
+To repeat, start a dedicated simulator using the instructions above and point
+the corresponding single-flight-worker example YAML at it. This test replaces
+and clears the simulator's ordinary mission; use only disposable simulator state.
+
+```bash
+PCVMF_SITL_TRANSACTIONS_CONFIG=/absolute/path/to/simulator.yaml \
+  uv run --no-sync pytest tests/test_sitl_transactions.py -q
+```
+
+The synthetic protocol tests additionally exercise lost packets, duplicate
+requests/late ACKs, typed parameter writes with changed values, PX4 integer
+bit-pattern preservation, ArduCopter cast/range rejection, missing parameter
+write acknowledgements, wrong mission recipients, mission refusal, oversized
+downloads, cancellation, and timeout/session invalidation without replay.
+They use the actual bundled MAVSDK server where applicable. The finite
+`examples/fake-transactions.yaml` asserts typed request/result exchange and
+download/readback values across spawned PCVMF workers, with MCAP and cleanup.
+
+The installed-wheel CI check now also exercises the new fake transaction
+example. The original wheel evidence above predates these features; no new
+local distribution build is claimed for this implementation pass. Physical
+Pixhawk and ARM64 verification remain outstanding.
 
 ## Clean wheel verification
 

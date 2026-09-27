@@ -9,7 +9,8 @@ from dataclasses import replace
 
 from .backends import create
 from .backends.base import LinkLost
-from .messages import ACTIONS, ActionResult, ConnectionStatus, VehicleTelemetry
+from .messages import ACTIONS, ConnectionStatus, VehicleTelemetry
+from .transactions import MissionRequest, ParameterRequest, disabled_reason, result_for
 
 
 class FlightService:
@@ -94,17 +95,30 @@ class FlightService:
             self.ready.set()
 
     async def _execute(self, adapter, request, requester):
-        deadline = min(self.options.action_timeout_s, request.expires_at - time.time())
+        timeout = self.options.action_timeout_s
+        operation = adapter.execute
+        if type(request) is MissionRequest:
+            timeout, operation = self.options.transfer_timeout_s, adapter.transfer_mission
+        elif type(request) is ParameterRequest:
+            timeout, operation = self.options.parameter_timeout_s, adapter.parameter
+        deadline = min(timeout, request.expires_at - time.time())
+        data = None
+        disabled = disabled_reason(request, self.options)
+        if disabled:
+            return result_for(request, requester, "disabled", disabled)
         if deadline <= 0:
             outcome, detail = "expired", "request expired before transmission"
         else:
             try:
-                outcome, detail = await asyncio.wait_for(adapter.execute(request), deadline)
+                response = await asyncio.wait_for(operation(request), deadline)
+                outcome, detail = response[:2]
+                if len(response) == 3:
+                    data = response[2]
             except ValueError as exc:
                 outcome, detail = "rejected", str(exc)
             except (TimeoutError, asyncio.TimeoutError, OSError):
                 outcome, detail = "outcome_unknown", "no definitive acknowledgement before the deadline"
-        return ActionResult(request.request_id, request.session_id, requester, request.action, outcome, detail[:512])
+        return result_for(request, requester, outcome, detail, data)
 
     async def _run(self):
         self.loop = asyncio.get_running_loop()
@@ -144,11 +158,9 @@ class FlightService:
                             continue
                         if request.session_id != session:
                             self.emit(
-                                ActionResult(
-                                    request.request_id,
-                                    request.session_id,
+                                result_for(
+                                    request,
                                     requester,
-                                    request.action,
                                     "session_mismatch",
                                     "connection session changed before transmission",
                                 )
@@ -167,11 +179,9 @@ class FlightService:
                         await asyncio.gather(active, return_exceptions=True)
                         request, requester = active_request
                         self.emit(
-                            ActionResult(
-                                request.request_id,
-                                request.session_id,
+                            result_for(
+                                request,
                                 requester,
-                                request.action,
                                 "outcome_unknown",
                                 "connection stopped during command transaction",
                             )
@@ -179,11 +189,9 @@ class FlightService:
                     while not self.commands.empty():
                         request, requester = self.commands.get_nowait()
                         self.emit(
-                            ActionResult(
-                                request.request_id,
-                                request.session_id,
+                            result_for(
+                                request,
                                 requester,
-                                request.action,
                                 "disconnected",
                                 "connection stopped before command transaction",
                             )

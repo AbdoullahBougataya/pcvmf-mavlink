@@ -5,9 +5,10 @@ from collections import OrderedDict
 
 from pcvmf.api import Worker
 
-from .messages import ActionRequest, ActionRequestCodec, ActionResult, ConnectionStatus
+from .messages import ConnectionStatus
 from .options import Options
 from .service import FlightService
+from .transactions import REQUEST_CODECS, MissionRequest, disabled_reason, result_for
 
 
 class FlightControllerWorker(Worker):
@@ -39,9 +40,11 @@ class FlightControllerWorker(Worker):
 
     def _command(self, message):
         request = message.payload
-        if message.topic != self.config.command_topic or type(request) is not ActionRequest:
+        if message.topic != self.config.command_topic or type(request) not in REQUEST_CODECS:
             return
-        ActionRequestCodec().encode(request)
+        codec = REQUEST_CODECS[type(request)]()
+        # Detach nested mission lists from the caller before caching/submitting.
+        request = codec.decode(codec.encode(request))
         key = (message.source, request.session_id, request.request_id)
         # Retain executed requests until expiry so cache pressure cannot make
         # a still-valid retransmission execute for a second time.
@@ -59,11 +62,9 @@ class FlightControllerWorker(Worker):
             else:
                 self.context.publisher.publish(
                     self.config.result_topic,
-                    ActionResult(
-                        request.request_id,
-                        request.session_id,
+                    result_for(
+                        request,
                         message.source,
-                        request.action,
                         "request_conflict",
                         "request ID already used with different content",
                     ),
@@ -72,18 +73,19 @@ class FlightControllerWorker(Worker):
         if len(self.cache) >= self.config.dedup_size:
             self.context.publisher.publish(
                 self.config.result_topic,
-                ActionResult(
-                    request.request_id,
-                    request.session_id,
+                result_for(
+                    request,
                     message.source,
-                    request.action,
                     "busy",
                     "deduplication cache is full; request was not submitted",
                 ),
             )
             return
-        if not self.config.commands_enabled:
-            outcome, detail = "disabled", "commands_enabled is false"
+        disabled = disabled_reason(request, self.config)
+        if disabled:
+            outcome, detail = "disabled", disabled
+        elif type(request) is MissionRequest and len(request.items) > self.config.max_mission_items:
+            outcome, detail = "rejected", "mission exceeds max_mission_items"
         elif request.expires_at <= self.context.wall_clock():
             outcome, detail = "expired", "request deadline has passed"
         elif status is None or status.state != "connected":
@@ -91,7 +93,7 @@ class FlightControllerWorker(Worker):
         elif request.session_id != status.session_id:
             outcome, detail = "session_mismatch", "request belongs to an old connection"
         elif self.pending is not None:
-            outcome, detail = "busy", "another action transaction is in progress"
+            outcome, detail = "busy", "another transaction is in progress"
         else:
             try:
                 self.service.submit(request, message.source)
@@ -100,7 +102,7 @@ class FlightControllerWorker(Worker):
             except queue.Full:
                 outcome, detail = "busy", "command queue is full"
         self._publish_result(
-            ActionResult(request.request_id, request.session_id, message.source, request.action, outcome, detail),
+            result_for(request, message.source, outcome, detail),
             request,
         )
 

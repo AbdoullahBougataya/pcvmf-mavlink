@@ -27,3 +27,28 @@ def test_spawned_typed_messages_commands_and_cleanup(tmp_path):
     assert json.loads(output.read_text())["actions_observed"] == ["arm", "takeoff", "land", "disarm"]
     assert {p.pid for p in multiprocessing.active_children()} == children
     assert Path(result.recording_path).stat().st_size > 0
+
+
+def test_spawned_mission_parameter_roundtrip(tmp_path):
+    raw = yaml.safe_load((ROOT / "examples/fake-transactions.yaml").read_text())
+    raw["logging"]["mcap"]["directory"] = str(tmp_path / "recordings")
+    output = tmp_path / "received.json"
+    raw["workers"][1]["plugin"]["options"] = {"output": str(output)}
+    children = {p.pid for p in multiprocessing.active_children()}
+    result = Application(parse_config(raw)).run()
+    assert result.exit_code == 0, result.errors
+    assert result.ready
+    assert json.loads(output.read_text())["transactions_observed"] == [
+        "upload",
+        "download",
+        "clear",
+        "download_empty",
+        "get_int",
+        "set_int",
+        "get_int_again",
+        "get_float",
+        "set_float",
+        "get_float_again",
+    ]
+    assert {p.pid for p in multiprocessing.active_children()} == children
+    assert Path(result.recording_path).stat().st_size > 0
