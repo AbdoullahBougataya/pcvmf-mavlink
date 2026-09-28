@@ -6,6 +6,7 @@ from collections import OrderedDict
 from pcvmf.api import Worker
 
 from .messages import ConnectionStatus
+from .navigation import Setpoint, SetpointCodec, StreamStatus
 from .options import Options
 from .service import FlightService
 from .transactions import REQUEST_CODECS, MissionRequest, disabled_reason, result_for
@@ -25,6 +26,7 @@ class FlightControllerWorker(Worker):
         self.cache = OrderedDict()
         self.pending = None
         self.last_status = self.last_telemetry = float("-inf")
+        self.last_stream_status = self.last_navigation = float("-inf")
         self.service = FlightService(self.config)
         self.service.start()
 
@@ -40,6 +42,10 @@ class FlightControllerWorker(Worker):
 
     def _command(self, message):
         request = message.payload
+        if message.topic == self.config.setpoint_topic and type(request) is Setpoint:
+            point = SetpointCodec().decode(SetpointCodec().encode(request))
+            self.service.submit_setpoint(point, message.source)
+            return
         if message.topic != self.config.command_topic or type(request) not in REQUEST_CODECS:
             return
         codec = REQUEST_CODECS[type(request)]()
@@ -118,6 +124,9 @@ class FlightControllerWorker(Worker):
             if isinstance(event, ConnectionStatus):
                 self.context.publisher.publish(self.config.status_topic, event)
                 self.last_status = now
+            elif isinstance(event, StreamStatus):
+                self.context.publisher.publish(self.config.stream_status_topic, event)
+                self.last_stream_status = now
             else:
                 self._publish_result(event)
             if self.context.monotonic() >= deadline:
@@ -136,6 +145,14 @@ class FlightControllerWorker(Worker):
         if telemetry is not None and now - self.last_telemetry >= 1 / self.config.telemetry_hz:
             self.context.publisher.publish(self.config.telemetry_topic, telemetry)
             self.last_telemetry = now
+        if self.config.setpoints_enabled or self.config.mission_execution_enabled:
+            stream, navigation = self.service.navigation_snapshot()
+            if stream is not None and now - self.last_stream_status >= 1:
+                self.context.publisher.publish(self.config.stream_status_topic, stream)
+                self.last_stream_status = now
+            if navigation is not None and now - self.last_navigation >= 1 / self.config.telemetry_hz:
+                self.context.publisher.publish(self.config.navigation_topic, navigation)
+                self.last_navigation = now
         return None
 
     def cleanup(self):

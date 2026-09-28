@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 
+from ..navigation import setpoint_fields
 from .base import Backend, LinkLost, heartbeat_values
 from .transfers import Transfers
 
@@ -66,7 +67,10 @@ class PymavlinkBackend(Transfers, Backend):
         while not self.last_heartbeat:
             await self.poll()
         # Requests are best-effort; unavailable telemetry remains absent/stale.
-        for message_id in (1, 24, 30, 33, 242, 245):
+        ids = [1, 24, 30, 33, 242, 245]
+        if self.options.setpoints_enabled or self.options.mission_execution_enabled:
+            ids += [32, 42, 46]
+        for message_id in ids:
             self.mav.command_long_send(
                 self.options.target_system, self.options.target_component, 511, 0, message_id, 100000, 0, 0, 0, 0, 0
             )
@@ -131,6 +135,7 @@ class PymavlinkBackend(Transfers, Backend):
         self._transaction_message(message)
         kind = message.get_type()
         d = message.to_dict()
+        self.navigation_message(kind, d)
         if kind == "HEARTBEAT":
             self.update("state", heartbeat_values(d, self.options))
             self.last_heartbeat = time.monotonic()
@@ -228,6 +233,36 @@ class PymavlinkBackend(Transfers, Backend):
         if action == "land":
             return await self._command(21, [0, 0, 0, float("nan"), float("nan"), float("nan"), 0])
         return await self._command(20, [])
+
+    async def send_setpoint(self, point):
+        self.mav.set_position_target_local_ned_send(**setpoint_fields(point, self.options))
+
+    async def stream_mode(self, enabled):
+        if self.options.firmware == "px4":
+            params = [1, 6] if enabled else [1, 4, 3]  # OFFBOARD / AUTO.LOITER
+        else:
+            params = [1, 4 if enabled else 5]  # GUIDED / LOITER
+        return await self._command(176, params)
+
+    async def control_mission(self, request):
+        if request.operation == "mission_start":
+            self.require_armed("mission start")
+            if self.options.firmware == "px4":
+                # PX4's MISSION_START command may arm the vehicle. A mode change
+                # starts/resumes the stored mission without implicit arming.
+                return await self._command(176, [1, 4, 4])
+            return await self._command(300, [0, 0])
+        if request.operation == "mission_pause":
+            if self.options.firmware == "px4":
+                return await self.stream_mode(False)
+            return await self._command(193, [0])
+        if self.options.firmware == "px4":
+            since = time.monotonic()
+            self.mav.mission_set_current_send(
+                self.options.target_system, self.options.target_component, request.mission_index
+            )
+            return await self.wait_mission_current(request.mission_index, since)
+        return await self._command(224, [request.mission_index, 0])
 
     async def close(self):
         errors = []

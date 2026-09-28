@@ -6,10 +6,13 @@ import threading
 import time
 import uuid
 from dataclasses import replace
+from functools import partial
 
 from .backends import create
 from .backends.base import LinkLost
-from .messages import ACTIONS, ConnectionStatus, VehicleTelemetry
+from .messages import ACTIONS, ActionRequest, ConnectionStatus, VehicleTelemetry
+from .navigation import ControlRequest, NavigationTelemetry, validate_setpoint_limits
+from .streaming import SetpointStream
 from .transactions import MissionRequest, ParameterRequest, disabled_reason, result_for
 
 
@@ -28,6 +31,8 @@ class FlightService:
         self.loop = None
         self.task = None
         self.thread = None
+        self.streaming = None
+        self.stream_status = self.navigation = self.setpoint_update = None
 
     def start(self):
         self.thread = threading.Thread(target=self._thread_main, name="flight-io", daemon=True)
@@ -46,6 +51,49 @@ class FlightService:
 
     def submit(self, request, requester):
         self.commands.put_nowait((request, requester))
+
+    def navigation_snapshot(self):
+        with self.lock:
+            return self.stream_status, self.navigation
+
+    def submit_setpoint(self, point, requester):
+        if not self.options.setpoints_enabled:
+            return False
+        try:
+            validate_setpoint_limits(point, self.options)
+        except ValueError:
+            return False
+        remaining = min(self.options.setpoint_timeout_s, point.expires_at - time.time())
+        if remaining <= 0:
+            return False
+        with self.lock:
+            status = self.stream_status
+            if self.status is None or self.status.state != "connected" or status is None:
+                return False
+            if status.state not in ("priming", "active") or (point.session_id, point.stream_id, requester) != (
+                status.session_id,
+                status.stream_id,
+                status.requester,
+            ):
+                return False
+            sequence = self.setpoint_update[0].sequence if self.setpoint_update else status.last_sequence
+            if point.sequence <= sequence:
+                return False
+            self.setpoint_update = (point, time.monotonic() + remaining)
+        return True
+
+    def _pull_setpoint(self):
+        with self.lock:
+            point, self.setpoint_update = self.setpoint_update, None
+            return point
+
+    def _stream_status(self, status, emit):
+        with self.lock:
+            self.stream_status = status
+            if status.state not in ("priming", "active"):
+                self.setpoint_update = None
+        if emit:
+            self.emit(status)
 
     def emit(self, event):
         # Losing a result silently would conceal the outcome of an action.
@@ -68,6 +116,7 @@ class FlightService:
             self.status = status
             if state != "connected":
                 self.telemetry = None
+                self.navigation = self.setpoint_update = None
         self.emit(status)
 
     def _telemetry(self, adapter, session):
@@ -84,6 +133,18 @@ class FlightService:
             self.telemetry = VehicleTelemetry(
                 session, self.options.target_system, self.options.target_component, samples
             )
+            if self.options.setpoints_enabled or self.options.mission_execution_enabled:
+                self.navigation = NavigationTelemetry(
+                    session,
+                    {
+                        key: replace(
+                            value,
+                            age_s=max(0, now - adapter.navigation_times[key]),
+                            stale=now - adapter.navigation_times[key] > self.options.telemetry_stale_s,
+                        )
+                        for key, value in adapter.navigation_samples.items()
+                    },
+                )
 
     def _thread_main(self):
         try:
@@ -101,6 +162,10 @@ class FlightService:
             timeout, operation = self.options.transfer_timeout_s, adapter.transfer_mission
         elif type(request) is ParameterRequest:
             timeout, operation = self.options.parameter_timeout_s, adapter.parameter
+        elif type(request) is ControlRequest:
+            operation = adapter.control_mission
+            if request.operation.startswith("stream_"):
+                operation = partial(self.streaming.control, requester=requester) if self.streaming else operation
         deadline = min(timeout, request.expires_at - time.time())
         data = None
         disabled = disabled_reason(request, self.options)
@@ -110,6 +175,11 @@ class FlightService:
             outcome, detail = "expired", "request expired before transmission"
         else:
             try:
+                if self.streaming is not None and self.streaming.busy:
+                    if type(request) is ActionRequest and request.action in ("land", "return_to_launch", "disarm"):
+                        self.streaming.supersede(request.action)
+                    elif not (type(request) is ControlRequest and request.operation == "stream_stop"):
+                        return result_for(request, requester, "busy", "stop the active stream before this transaction")
                 response = await asyncio.wait_for(operation(request), deadline)
                 outcome, detail = response[:2]
                 if len(response) == 3:
@@ -134,11 +204,15 @@ class FlightService:
             try:
                 await asyncio.wait_for(adapter.connect(), o.connect_timeout_s)
                 self._status("connected", session, "expected vehicle connected")
+                if o.setpoints_enabled:
+                    self.streaming = SetpointStream(adapter, o, session, self._stream_status, self._pull_setpoint)
                 first = False
                 self.ready.set()
                 connected_at = time.monotonic()
                 while not self.stopping.is_set():
                     await adapter.poll()
+                    if self.streaming is not None:
+                        self.streaming.check()
                     if time.monotonic() - adapter.last_heartbeat > o.link_timeout_s:
                         raise LinkLost("heartbeat timed out")
                     self._telemetry(adapter, session)
@@ -197,7 +271,12 @@ class FlightService:
                             )
                         )
                 finally:
-                    await asyncio.wait_for(adapter.close(), o.cleanup_timeout_s)
+                    try:
+                        if self.streaming is not None:
+                            await self.streaming.close()
+                            self.streaming = None
+                    finally:
+                        await asyncio.wait_for(adapter.close(), o.cleanup_timeout_s)
             if not self.stopping.is_set():
                 await asyncio.sleep(backoff)
                 backoff = min(o.reconnect_max_s, backoff * 2)

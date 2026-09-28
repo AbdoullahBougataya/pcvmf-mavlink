@@ -73,6 +73,12 @@ Structural validation does not establish vehicle reachability.
 | `parameter_writes_enabled` | `false` | Also enable parameter writes; requires `parameters_enabled` |
 | `transfer_timeout_s`, `parameter_timeout_s` | `30`, `5` | Whole mission / parameter transaction deadlines |
 | `max_mission_items` | `500` | Upload/download item limit (1–10000) |
+| `setpoints_enabled` | `false` | Enable leased local NED position/velocity streams |
+| `mission_execution_enabled` | `false` | Enable mission start, pause and current-item selection |
+| `setpoint_hz`, `setpoint_timeout_s` | `20`, `0.5` | Send frequency and maximum silence before stream expiry |
+| `stream_stop_timeout_s` | `2` | Budget for requesting Hold/Loiter on stream expiry |
+| `max_setpoint_speed_m_s`, `max_setpoint_distance_m` | `5`, `100` | Vector speed and position norm limits (position measured from EKF origin) |
+| `setpoint_topic`, `stream_status_topic`, `navigation_topic` | `flight/setpoint`, `flight/stream_status`, `flight/navigation` | Stream input, stream lifecycle, and local/mission telemetry |
 | `target_system`, `target_component` | `1`, `1` | Expected autopilot IDs |
 | `source_system`, `source_component` | `245`, `190` | This connection's MAVLink identity |
 | `connect_timeout_s` | `15` | Initial connection and each reconnect attempt |
@@ -190,6 +196,38 @@ uv run --no-sync pcvmf run --config examples/fake-transactions.yaml
 [mission and parameter API](docs/transactions.md) for payload examples, coordinate
 frames, firmware differences, limits, and transfer outcome semantics.
 
+## Streamed setpoints and mission execution
+
+All three supported backend/firmware pairs implement local NED position/yaw and
+velocity/yaw streams, plus mission start, pause, and current-item selection.
+Enable `setpoints_enabled` and/or `mission_execution_enabled` explicitly. Starting
+a stream or mission requires fresh armed telemetry; stream start also requires
+finite, fresh local position. Arming and takeoff remain explicit actions.
+
+Navigation uses separate schema-version-1 codecs from `pcvmf_mavlink.navigation`:
+`ControlRequestCodec`, `ControlResultCodec`, `SetpointCodec`, `StreamStatusCodec`,
+and `NavigationTelemetryCodec`. Existing schemas are unchanged. Control requests
+and results use the existing command/result topics. Declare `flight/navigation`
+when either feature is enabled, and `flight/stream_status` for streams. A setpoint
+producer publishes `flight/setpoint`; subscribe with `delivery: latest`. The
+worker keeps only the newest valid update for the current owner and stream.
+
+Each stream starts with an initial setpoint and a new stream ID. Keep publishing
+fresh, increasing-sequence updates during activation and execution. PX4 activation
+includes more than one second of priming before changing to OFFBOARD. ArduCopter
+uses GUIDED. On stale input, transmission stops and the adapter requests PX4 Hold
+or ArduCopter Loiter. Reconnect and observed mode departures invalidate the stream;
+old updates cannot restart it. Land, RTL and disarm can supersede an active stream.
+
+```bash
+uv run --no-sync pcvmf config validate examples/fake-navigation.yaml
+uv run --no-sync pcvmf run --config examples/fake-navigation.yaml
+```
+
+This finite fake-only example observes state changes through streaming and
+mission controls. See [navigation API](docs/navigation.md) for ownership, expiry,
+coordinate frames, mission progress, backend details, and failure behavior.
+
 ## Verification and distribution
 
 ```bash
@@ -210,7 +248,7 @@ scenario. Editable installs and `PYTHONPATH` are not distribution verification.
 Enable PCVMF's native recording with `logging: {mcap: {directory: recordings}}`;
 `examples/fake.yaml` demonstrates this. The plugin needs no special recorder.
 
-Streamed setpoints, raw forwarding, signing, fleet coordination, and automatic
-navigation remain future work. Mission execution, geofence/rally transfer,
-parameter enumeration/metadata, and string/64-bit parameters are also outside
-the current API.
+Raw forwarding, signing, fleet coordination, and automatic route planning remain
+future work. Geofence/rally transfer, parameter enumeration/metadata, string/64-bit
+parameters, and body-frame/attitude/acceleration setpoints are also outside the
+current API.

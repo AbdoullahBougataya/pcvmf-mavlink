@@ -164,6 +164,60 @@ example. The original wheel evidence above predates these features; no new
 local distribution build is claimed for this implementation pass. Physical
 Pixhawk and ARM64 verification remain outstanding.
 
+## Streamed setpoints and mission execution acceptance
+
+On 2026-09-27 the full package suite passed on Python 3.10.20, 3.11.15, and
+3.12.3: **144 passed, 3 skipped** per interpreter. The skips are the three
+explicit simulator opt-ins. A subsequent option-validation ordering correction
+added two malformed-timeout cases; all seven navigation option checks passed on
+each interpreter. Ruff, Black, whitespace checks, and `pcvmf config validate
+examples/fake-navigation.yaml` passed.
+
+The navigation checks cover typed codecs, exclusive position/velocity targets,
+owner/session/stream matching, sequence ordering, input expiry, bounded stream
+ID history, and limits. Protocol peers exercise position-target packet fields,
+mode transitions, mission start/pause/current-index selection, no implicit arming,
+and cessation of transmission after expiry using all three supported pairs,
+including the bundled MAVSDK server. Deterministic failure checks cover expiry
+during PX4 priming, pilot mode departure, terminal-action takeover, rejected Hold,
+and a pending send at the lease boundary. Lease cancellation follows the expiry
+and Hold path; an earlier transport timeout still invalidates the connection.
+
+The finite `examples/fake-navigation.yaml` runs spawned PCVMF workers and verifies
+typed control results alongside observed navigation state, successful completion,
+MCAP recording, and cleanup. Installed-wheel CI now runs this example as well.
+No new local distribution build or ARM64 execution is claimed for this increment.
+
+Navigation flight scenarios passed on the firmware revisions listed above for
+pymavlink/ArduCopter, pymavlink/PX4, and MAVSDK/PX4. Each used fresh disposable
+simulator state and checked explicit arm/takeoff, physical movement toward a local
+position target, movement from a velocity target, input expiry and Hold/Loiter,
+mission upload/start/progress/pause/current-index selection, landing, and disarming.
+Pause also checked reduced horizontal speed in the ArduCopter and MAVSDK/PX4 runs;
+that assertion was added after the pymavlink/PX4 run. Simulator checks are distinct
+from protocol-peer checks and do not establish behavior on a physical vehicle.
+
+After the lease-boundary fix, MAVSDK/PX4 was rerun successfully (47.12 seconds).
+The first attempt at this final run failed during takeoff, before stream activation:
+PX4 reported missing simulated barometer/magnetometer data and landed/disarmed.
+A fresh simulator passed the complete scenario without changing arming checks,
+failsafe settings, or package code. This simulator failure remains part of the
+validation record rather than being counted as a successful navigation run.
+
+To repeat, start a dedicated simulator as above and select its corresponding
+single-flight-worker YAML:
+
+```bash
+PCVMF_SITL_NAVIGATION_CONFIG=/absolute/path/to/simulator.yaml \
+  uv run --no-sync pytest tests/test_sitl_navigation.py -q
+```
+
+This opt-in test enables actions, mission transfer, streamed setpoints, and mission
+execution. It replaces the simulator's mission, arms, and flies the vehicle; use
+only disposable simulator state. It observes telemetry after control acceptance
+and does not disable arming checks or change failsafe parameters. Physical Pixhawk,
+USB/radio links, and onboard loss-of-control behavior remain unverified.
+
 ## Clean wheel verification
 
 Build the framework and plugin wheels, install them together in a clean virtual

@@ -13,6 +13,7 @@ import time
 from importlib.resources import files
 from types import SimpleNamespace
 
+from ..navigation import setpoint_fields
 from ..transactions import float32, item_from_wire, item_to_wire
 from .base import Backend, LinkLost, heartbeat_values
 
@@ -24,6 +25,8 @@ class MavsdkBackend(Backend):
         super().__init__(options)
         self.process = self.channel = None
         self.tasks = []
+        self.navigation_ack = None
+        self.navigation_command_id = None
 
     async def connect(self):
         import grpc
@@ -72,6 +75,9 @@ class MavsdkBackend(Backend):
         self.telemetry_api = Telemetry(provider)
         self.direct = MavlinkDirect(provider)
         self.tasks.append(asyncio.create_task(self._heartbeats()))
+        if self.options.setpoints_enabled or self.options.mission_execution_enabled:
+            for kind in ("LOCAL_POSITION_NED", "MISSION_CURRENT", "MISSION_ITEM_REACHED", "COMMAND_ACK"):
+                self.tasks.append(asyncio.create_task(self._navigation_messages(kind)))
         streams = {
             "position": (
                 "position",
@@ -148,8 +154,27 @@ class MavsdkBackend(Backend):
             self.update(group, convert(value))
         raise LinkLost(f"MAVSDK {stream} stream ended")
 
+    async def _navigation_messages(self, kind):
+        async for message in self.direct.message(kind):
+            if (message.system_id, message.component_id) != (self.options.target_system, self.options.target_component):
+                continue
+            d = json.loads(message.fields_json)
+            self.navigation_message(kind, d)
+            if kind == "COMMAND_ACK" and self.navigation_ack is not None and not self.navigation_ack.done():
+                if (
+                    d["command"] == self.navigation_command_id
+                    and d.get("target_system", 0) in (0, self.options.source_system)
+                    and d.get("target_component", 0) in (0, self.options.source_component)
+                ):
+                    if d["result"] != 5:
+                        self.navigation_ack.set_result(d["result"])
+        raise LinkLost(f"MAVSDK navigation stream ended: {kind}")
+
     async def _rates(self):
-        for name in ("position", "velocity_ned", "attitude_euler", "battery", "gps_info", "landed_state"):
+        names = ["position", "velocity_ned", "attitude_euler", "battery", "gps_info", "landed_state"]
+        if self.options.setpoints_enabled:
+            names.insert(0, "position_velocity_ned")
+        for name in names:
             try:
                 await asyncio.wait_for(getattr(self.telemetry_api, f"set_rate_{name}")(self.options.telemetry_hz), 1)
             except asyncio.TimeoutError:
@@ -308,3 +333,77 @@ class MavsdkBackend(Backend):
             raise
         except self.grpc.aio.AioRpcError as exc:
             return "outcome_unknown", f"MAVSDK RPC {exc.code()}", None
+
+    async def _send_direct(self, name, fields):
+        from mavsdk.mavlink_direct import MavlinkDirectError, MavlinkMessage
+
+        o = self.options
+        try:
+            await self.direct.send_message(
+                MavlinkMessage(
+                    name,
+                    o.source_system,
+                    o.source_component,
+                    o.target_system,
+                    o.target_component,
+                    json.dumps(fields, allow_nan=False),
+                )
+            )
+        except (MavlinkDirectError, self.grpc.aio.AioRpcError) as exc:
+            raise LinkLost(f"MAVSDK direct send failed: {exc}") from exc
+
+    async def send_setpoint(self, point):
+        await self._send_direct("SET_POSITION_TARGET_LOCAL_NED", setpoint_fields(point, self.options))
+
+    async def stream_mode(self, enabled):
+        return await self._navigation_command(176, [1, 6 if enabled else 4, 0 if enabled else 3])
+
+    async def _navigation_command(self, command, params):
+        self.navigation_command_id = command
+        self.navigation_ack = asyncio.get_running_loop().create_future()
+        try:
+            params = params + [0] * (7 - len(params))
+            await self._send_direct(
+                "COMMAND_LONG",
+                dict(
+                    target_system=self.options.target_system,
+                    target_component=self.options.target_component,
+                    command=command,
+                    confirmation=0,
+                    **{f"param{i + 1}": value for i, value in enumerate(params)},
+                ),
+            )
+            result = await self.navigation_ack
+            return (
+                "accepted" if result == 0 else "unsupported" if result == 3 else "rejected",
+                f"COMMAND_ACK command={command} result={result}",
+            )
+        finally:
+            self.navigation_ack = None
+            self.navigation_command_id = None
+
+    async def control_mission(self, request):
+        from mavsdk.mission_raw import MissionRawError
+
+        try:
+            if request.operation == "mission_start":
+                self.require_armed("mission start")
+                await self.mission_api.start_mission()
+            elif request.operation == "mission_pause":
+                await self.mission_api.pause_mission()
+            else:
+                since = time.monotonic()
+                await self._send_direct(
+                    "MISSION_SET_CURRENT",
+                    dict(
+                        target_system=self.options.target_system,
+                        target_component=self.options.target_component,
+                        seq=request.mission_index,
+                    ),
+                )
+                return await self.wait_mission_current(request.mission_index, since)
+            return "accepted", "mission control accepted; observe telemetry for execution"
+        except MissionRawError as exc:
+            return self._transaction_error(exc)[:2]
+        except self.grpc.aio.AioRpcError as exc:
+            return "outcome_unknown", f"MAVSDK RPC {exc.code()}"

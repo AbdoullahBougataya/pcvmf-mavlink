@@ -17,6 +17,16 @@ class Options:
     transfer_timeout_s: float = 30
     parameter_timeout_s: float = 5
     max_mission_items: int = 500
+    setpoints_enabled: bool = False
+    mission_execution_enabled: bool = False
+    setpoint_hz: float = 20
+    setpoint_timeout_s: float = 0.5
+    stream_stop_timeout_s: float = 2
+    max_setpoint_speed_m_s: float = 5
+    max_setpoint_distance_m: float = 100
+    setpoint_topic: str = "flight/setpoint"
+    stream_status_topic: str = "flight/stream_status"
+    navigation_topic: str = "flight/navigation"
     target_system: int = 1
     target_component: int = 1
     source_system: int = 245
@@ -50,7 +60,14 @@ class Options:
         choice(o.firmware, ("px4", "arducopter"), "firmware")
         if o.backend == "mavsdk" and o.firmware != "px4":
             raise ValueError("MAVSDK/ArduCopter is not supported in this release")
-        for key in ("commands_enabled", "missions_enabled", "parameters_enabled", "parameter_writes_enabled"):
+        for key in (
+            "commands_enabled",
+            "missions_enabled",
+            "parameters_enabled",
+            "parameter_writes_enabled",
+            "setpoints_enabled",
+            "mission_execution_enabled",
+        ):
             if type(getattr(o, key)) is not bool:
                 raise ValueError(f"{key} must be boolean")
         if o.parameter_writes_enabled and not o.parameters_enabled:
@@ -58,6 +75,11 @@ class Options:
         if o.backend == "mavsdk" and o.parameters_enabled and o.target_component != 1:
             raise ValueError("MAVSDK parameter API supports autopilot component 1 only")
         number(o.max_mission_items, "max_mission_items", 1, 10000, True)
+        number(o.setpoint_hz, "setpoint_hz", 5, 50)
+        number(o.setpoint_timeout_s, "setpoint_timeout_s", 0.1, 5)
+        number(o.stream_stop_timeout_s, "stream_stop_timeout_s", 0.1, 5)
+        number(o.max_setpoint_speed_m_s, "max_setpoint_speed_m_s", 0.01, 1000)
+        number(o.max_setpoint_distance_m, "max_setpoint_distance_m", 0.01, 1000000)
         for k in ("target_system", "target_component", "source_system", "source_component"):
             number(getattr(o, k), k, 1, 255, True)
         if o.source_system == o.target_system:
@@ -76,14 +98,24 @@ class Options:
             "receive_budget_ms",
         ):
             number(getattr(o, k), k, 0.001)
+        if o.setpoints_enabled and o.action_timeout_s <= 1.2:
+            raise ValueError("setpoints require action_timeout_s > 1.2 for PX4 stream priming and mode acknowledgement")
         if o.reconnect_max_s < o.reconnect_initial_s:
             raise ValueError("reconnect_max_s must be >= reconnect_initial_s")
         for k in ("max_messages", "event_queue_size", "dedup_size"):
             number(getattr(o, k), k, 1, 100000, True)
-        topics = [o.telemetry_topic, o.status_topic, o.command_topic, o.result_topic]
+        topics = [
+            o.telemetry_topic,
+            o.status_topic,
+            o.command_topic,
+            o.result_topic,
+            o.setpoint_topic,
+            o.stream_status_topic,
+            o.navigation_topic,
+        ]
         for topic in topics:
             text(topic, "topic")
-        if len(set(topics)) != 4:
+        if len(set(topics)) != len(topics):
             raise ValueError("flight topics must be distinct")
         c = o.connection
         if o.backend == "fake":

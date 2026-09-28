@@ -5,6 +5,7 @@ import struct
 from dataclasses import dataclass, field, fields
 
 from .messages import OUTCOMES, ActionRequest, ActionRequestCodec, ActionResult, _Codec, choice, number, text
+from .navigation import ControlRequest, ControlRequestCodec, ControlResult
 
 MAX_MISSION_ITEMS = 10000
 
@@ -198,6 +199,7 @@ REQUEST_CODECS = {
     ActionRequest: ActionRequestCodec,
     MissionRequest: MissionRequestCodec,
     ParameterRequest: ParameterRequestCodec,
+    ControlRequest: ControlRequestCodec,
 }
 
 
@@ -208,10 +210,15 @@ def result_for(request, requester, outcome, detail, data=None):
         return ActionResult(*identity, request.action, *tail)
     if type(request) is MissionRequest:
         return MissionResult(*identity, request.operation, *tail, data)
+    if type(request) is ControlRequest:
+        return ControlResult(*identity, request.operation, *tail)
     return ParameterResult(*identity, request.operation, *tail, request.name, request.parameter_type, data)
 
 
 def disabled_reason(request, options):
+    if type(request) is ControlRequest:
+        flag = "setpoints_enabled" if request.operation.startswith("stream_") else "mission_execution_enabled"
+        return None if getattr(options, flag) else f"{flag} is false"
     if type(request) is ActionRequest:
         return None if options.commands_enabled else "commands_enabled is false"
     if type(request) is MissionRequest:

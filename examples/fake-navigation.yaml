@@ -1,0 +1,45 @@
+codecs:
+- pcvmf_mavlink.messages:VehicleTelemetryCodec
+- pcvmf_mavlink.messages:ConnectionStatusCodec
+- pcvmf_mavlink.messages:ActionRequestCodec
+- pcvmf_mavlink.messages:ActionResultCodec
+- pcvmf_mavlink.transactions:MissionRequestCodec
+- pcvmf_mavlink.transactions:MissionResultCodec
+- pcvmf_mavlink.navigation:ControlRequestCodec
+- pcvmf_mavlink.navigation:ControlResultCodec
+- pcvmf_mavlink.navigation:SetpointCodec
+- pcvmf_mavlink.navigation:StreamStatusCodec
+- pcvmf_mavlink.navigation:NavigationTelemetryCodec
+workers:
+- name: flight
+  plugin:
+    class: pcvmf_mavlink.worker:FlightControllerWorker
+    options:
+      backend: fake
+      firmware: px4
+      connection: {}
+      commands_enabled: true
+      missions_enabled: true
+      setpoints_enabled: true
+      mission_execution_enabled: true
+  publications: [flight/telemetry, flight/status, flight/result, flight/navigation, flight/stream_status]
+  subscriptions:
+  - {source: navigation, topic: flight/command, delivery: ordered}
+  - {source: navigation, topic: flight/setpoint, delivery: latest}
+  rate_hz: 50
+  startup_timeout: 30
+  progress_timeout: 10
+  shutdown_timeout: 5
+- name: navigation
+  plugin:
+    class: pcvmf_mavlink.navigation_example:NavigationSmokeWorker
+  publications: [flight/command, flight/setpoint]
+  subscriptions:
+  - {source: flight, topic: flight/telemetry, delivery: latest}
+  - {source: flight, topic: flight/status, delivery: latest}
+  - {source: flight, topic: flight/result, delivery: ordered}
+  - {source: flight, topic: flight/navigation, delivery: latest}
+  - {source: flight, topic: flight/stream_status, delivery: latest}
+  rate_hz: 50
+logging:
+  mcap: {directory: recordings}
